@@ -1,0 +1,182 @@
+---
+title: "p8105_hw6_tz6259"
+author: "Tianci Zhu"
+output: github_document
+---
+
+## Problem 2
+```{r setup, include=FALSE}
+library(tidyverse)
+library(janitor)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(modelr)
+library(tidymodels)
+```
+
+Create a city_state variable (e.g. “Baltimore, MD”), and a binary variable indicating whether the homicide is solved. Omit cities Dallas, TX; Phoenix, AZ; and Kansas City, MO – these don’t report victim race. Also omit Tulsa, AL – this is a data entry mistake. For this problem, limit your analysis those for whom victim_race is white or black. Be sure that victim_age is numeric./
+
+Clean data:
+```{r}
+homi <- read_csv("D:/rdata/homicide-data.csv") |> 
+  janitor::clean_names() |>
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    resolved = as.numeric(disposition == "Closed by arrest"),
+    victim_age = as.numeric(victim_age),
+    victim_race = fct_relevel(victim_race, "White")
+  ) |> 
+  filter(
+    !city_state %in% c("Dallas", "Phoenix", "Kansas City", "Tulsa"),
+    victim_race %in% c("White", "Black")
+  ) |>
+  drop_na(victim_age) 
+head(homi)
+```
+
+Logistic regression for Baltimore, MD
+```{r}
+balt_glm <- homi |> 
+  filter(city_state == "Baltimore, MD") |> 
+  glm(resolved ~ victim_age + victim_sex + victim_race, data = _, family = binomial())
+
+baltimore_results <- balt_glm |> 
+  broom::tidy(conf.int = TRUE, exponentiate = TRUE) |> 
+  filter(term == "victim_sexMale") |> 
+  select(term, OR = estimate, conf.low, conf.high) |> 
+  rename(
+    `Odds Ratio` = OR,
+    `Lower CI` = conf.low,
+    `Upper CI` = conf.high
+  )
+
+baltimore_results |> 
+  knitr::kable(digits = 3, col.names = c("Term", "Odds Ratio", "Lower CI", "Upper CI"))
+```
+
+Logistic regressions for all cities
+```{r}
+all_df <- homi |> 
+  group_by(city_state) |> 
+  nest() |> 
+  mutate(
+    model = purrr::map(data, ~tryCatch(
+      glm(resolved ~ victim_age + victim_sex + victim_race, data = ., family = binomial()),
+      error = function(e) NULL  # Handle errors by returning NULL
+    )),
+    outputs = purrr::map(model, ~if (!is.null(.)) broom::tidy(.x, conf.int = TRUE, exponentiate = TRUE) else NULL)
+  ) |> 
+  filter(!is.null(outputs)) |>  # Remove cities where models failed
+  unnest(outputs) |> 
+  filter(term == "victim_sexMale") |> 
+  select(city_state, term, OR = estimate, conf.low, conf.high) |> 
+  rename(
+    `Odds Ratio` = OR,
+    `Lower CI` = conf.low,
+    `Upper CI` = conf.high
+  )
+
+all_df |> 
+  knitr::kable(digits = 3, col.names = c("City", "Term", "Odds Ratio", "Lower CI", "Upper CI"))
+```
+
+Plotting ORs and CIs by city
+```{r}
+ggplot(all_df, aes(x = reorder(city_state, `Odds Ratio`), y = `Odds Ratio`)) +
+  geom_point() + 
+  geom_errorbar(aes(ymin = `Lower CI`, ymax = `Upper CI`),) +  
+  labs(
+    title = "Estimated Odds Ratios with Confidence Intervals by City",
+    x = "City",
+    y = "Odds Ratio"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+The plot for Problem 2 shows the estimated odds ratios (ORs) and confidence intervals (CIs) for solving homicides by city, comparing male to female victims. Cities are ordered by OR. Most cities have ORs below 1, indicating lower odds of resolving cases for male victims compared to female victims. Wide confidence intervals for some cities suggest variability or limited data in those locations. \
+
+
+## Problem 3
+Clean data
+```{r}
+bw = read_csv("D:/rdata/birthweight.csv") |> 
+  drop_na() |> 
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), 
+                     labels = c("male", "female")),
+    malform = factor(malform, levels = c(0, 1), 
+                     labels = c("absent", "present")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                   labels = c("white", "black", "asian", "puerto rican", "other")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                   labels = c("white", "black", "asian", "puerto rican", "other", "unknown"))
+  ) |> 
+  select(-pnumlbw)
+
+head(bw)
+```
+
+Propose a Regression Model and Evaluate Residuals
+```{r}
+bw_model <- lm(bwt ~ babysex + bhead + blength + delwt + frace + gaweeks + malform + mrace + momage + mheight +ppbmi + smoken + wtgain, data = bw)
+
+summary(bw_model)
+```
+
+```{r}
+adjust_model = lm(bwt ~ babysex + bhead + blength + gaweeks + mrace + smoken, data = bw)
+
+summary(adjust_model)
+```
+
+Plot residuals against fitted values
+```{r} 
+bw |> 
+  add_predictions(adjust_model) |> 
+  add_residuals(adjust_model) |> 
+  ggplot(aes(x = resid, y = pred)) +
+  geom_point() 
+```
+
+Perform cross-validation and compute RMSE
+```{r}
+cv_df <- 
+  crossv_mc(bw, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+    # Fit models to training sets
+    adjust_model = map(train, ~lm(bwt ~ babysex + bhead + blength + gaweeks + mrace + smoken, data = .x)),
+    model_1 = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    model_2 = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x)),
+    # Compute RMSE manually
+    rmse_new = map2_dbl(adjust_model, test, ~{
+      preds <- predict(.x, newdata = .y)
+      sqrt(mean((.y$bwt - preds)^2))
+    }),
+    rmse_1 = map2_dbl(model_1, test, ~{
+      preds <- predict(.x, newdata = .y)
+      sqrt(mean((.y$bwt - preds)^2))
+    }),
+    rmse_2 = map2_dbl(model_2, test, ~{
+      preds <- predict(.x, newdata = .y)
+      sqrt(mean((.y$bwt - preds)^2))
+    })
+  )
+
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    cols = everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = model, y = rmse)) +
+  geom_violin(alpha = 0.7) +
+  labs(title = "Cross-Validated RMSE Comparison", x = "Model", y = "RMSE")
+
+```
+

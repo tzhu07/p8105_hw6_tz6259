@@ -1,0 +1,215 @@
+---
+title: "p8105_hw6_yz4990"
+author: "Yucheng Zhao"
+date: "2024-12-02"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(modelr)
+set.seed(1)
+```
+
+
+## Problem 1.
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2017-01-01",
+    date_max = "2017-12-31") %>%
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) %>%
+  select(name, id, everything())
+```
+bootstrap, confidence intervals for $R^2$ and $log(\beta_{1}\beta_{2})$
+```{r}
+log_ab = function(mod) {
+  a = broom::tidy(mod)$estimate[1]
+  b = broom::tidy(mod)$estimate[2]
+  return(log(a * b))
+}
+
+boot = weather_df |> 
+  modelr::bootstrap(n = 5000) |> 
+  mutate(
+    models = map(strap, \(df) lm(tmax ~ tmin, data = df) ),
+    r2 = map_dbl(models, \(mod) broom::glance(mod)$r.squared),
+    log_b1b2 = map_dbl(models, \(mod) log_ab(mod))
+  ) |> 
+  summarize(
+    r2_lo = quantile(r2, 0.025),
+    r2_up = quantile(r2, 0.975),
+    log_b1b2_lo = quantile(log_b1b2, 0.025),
+    log_b1b2_up = quantile(log_b1b2, 0.975)
+  )
+
+boot
+```
+
+
+## Problem 2.
+data cleaning
+```{r}
+homi_df = read_csv("./data/homicide-data.csv", 
+                   na = c("NA", "Unknown", ""), 
+                   ) |> 
+  janitor::clean_names() |> 
+  mutate(
+    city_state = paste(city, state, sep = ", "),
+    resolved = as.numeric(disposition == "Closed by arrest")
+    ) |> 
+  filter(city != "Dallas", 
+         city != "Phoenix",
+         city != "Kansas City", 
+         city != "Tulsa") |> 
+  filter(victim_race == "White" | victim_race == "Black") |> 
+  drop_na(victim_age) |> 
+  mutate(victim_age = as.numeric(victim_age))
+
+head(homi_df)
+```
+
+logistic regression for binary variable "resolved"
+```{r}
+balti_df = homi_df |> 
+  filter(city == "Baltimore")
+
+fit_logistic = 
+  balti_df |> 
+  glm(resolved ~ victim_age + victim_sex + victim_race, data = _, family = binomial()) 
+
+fit_logistic |> 
+  broom::tidy(conf.int = TRUE) |> 
+  filter(term == "victim_sexMale") |> 
+  mutate(OR = exp(estimate),
+         conf.low = exp(conf.low), 
+         conf.high = exp(conf.high)
+         ) |>
+  select(term, OR, conf.low, conf.high) |> 
+  knitr::kable(digits = 3)
+```
+
+
+glm for each city
+```{r}
+results_df = homi_df |> 
+  group_by(city) |> 
+  nest() |> 
+  mutate(
+    model = purrr::map(data, \(x) glm(resolved ~ victim_age + victim_sex + victim_race, 
+                                          data = x, family = binomial())),
+    outputs = purrr::map(model, \(x) broom::tidy(x, conf.int = TRUE))
+    ) |> 
+  unnest(outputs) |> 
+  filter(term == "victim_sexMale") |> 
+  mutate(
+    OR = exp(estimate),
+    conf.low = exp(conf.low),
+    conf.high = exp(conf.high)
+    ) |>
+  select(term, OR, conf.low, conf.high)
+  
+knitr::kable(results_df, digits = 3)
+```
+
+
+plot of the estimated ORs and CIs for each city
+```{r}
+ggplot(results_df, aes(x = reorder(city, OR), y = OR)) +
+  geom_point() +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high)) +
+  labs(
+    title = "Estimated Odds Ratios with Confidence Intervals by City",
+    x = "City",
+    y = "Odds Ratio"
+  ) + 
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 90)
+  )
+  
+```
+
+
+## Problem 3.
+data cleaning
+```{r}
+bw_df = read_csv("./data/birthweight.csv") |> 
+  drop_na() |> 
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), 
+                     labels = c("male", "female")),
+    malform = factor(malform, levels = c(0, 1), 
+                     labels = c("absent", "present")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                   labels = c("white", "black", "asian", "puerto rican", "other")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                   labels = c("white", "black", "asian", "puerto rican", "other", "unknown"))
+  ) |> 
+  select(-pnumlbw)
+
+head(bw_df)
+  
+```
+
+propose a regression model, check for insignificant predictors
+```{r}
+bw_model = lm(bwt ~ babysex + bhead + blength + delwt + frace + gaweeks + malform + mrace + momage + mheight +ppbmi + smoken + wtgain, data = bw_df)
+
+summary(bw_model)
+```
+The initial model includes many potential factors that may have an effect on birthweight, such as babysex, bhead, frace, mrace, smoken, etc. The significance of the predictors are verified using the "summary()" function. According to model selection based on significant level, where the predictors with p-value > 0.05 are considered insignificant, the insignificant predictors are: delwt, frace, malformpresent, mraceasian, mracepuerto rican, momage, mheight, ppbmi, and wtgain. These insignificant predictors are removed in the new model. The new model has 6 predictors, which are babysex, bhead, blength, gaweeks, mrace, and smoken. This new model is better for interpretation and remains a high adjusted R square value of 0.7051. 
+
+
+```{r}
+new_model = lm(bwt ~ babysex + bhead + blength + gaweeks + mrace + smoken, data = bw_df)
+
+summary(new_model)
+```
+
+plot of residuals against predictions
+```{r}
+bw_df |> 
+  add_predictions(new_model) |> 
+  add_residuals(new_model) |> 
+  ggplot(aes(x = resid, y = pred)) +
+  geom_point()
+```
+
+
+
+comparison of RMSE
+```{r}
+cv_df = 
+  crossv_mc(bw_df, 100) |> 
+  mutate(
+    train = map(train, as_tibble),
+    test = map(test, as_tibble),
+    new_model = map(train, \(df) lm(bwt ~ babysex + bhead + blength + gaweeks + mrace + smoken, data = df)),
+    model_1 = map(train, \(df) lm(bwt ~ blength + gaweeks, data = df)),
+    model_2 = map(train, \(df) lm(bwt ~ bhead * blength * babysex, data = df)),
+    rmse_new = map2_dbl(new_model, test, \(mod, df) rmse(model = mod, data = df)),
+    rmse_1 = map2_dbl(model_1, test, \(mod, df) rmse(model = mod, data = df)),
+    rmse_2 = map2_dbl(model_2, test, \(mod, df) rmse(model = mod, data = df))
+  )
+
+cv_df |> 
+  select(starts_with("rmse")) |> 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") |> 
+  mutate(model = fct_inorder(model)) |> 
+  ggplot(aes(x = model, y = rmse)) + geom_violin()
+  
+```
+From the violin plot above, it can be seen that the new model has less RMSE and is performing better than model 1 and model 2.
+
+
+
